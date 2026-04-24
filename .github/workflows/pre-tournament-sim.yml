@@ -1,0 +1,79 @@
+name: Pre-Tournament Bracket Simulation
+
+# Manual trigger: run after the draw is released (1-2 days before Slam starts)
+on:
+  workflow_dispatch:
+    inputs:
+      tournament:
+        description: 'Tournament (Australian Open | Roland Garros | Wimbledon | US Open)'
+        required: true
+        default: 'Roland Garros'
+      year:
+        description: 'Year'
+        required: false
+        default: ''
+      num_sims:
+        description: 'Number of simulations (default: 10000)'
+        required: false
+        default: '10000'
+      dry_run:
+        description: 'Dry run (no Discord message)'
+        required: false
+        default: 'false'
+
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download Sackmann data
+        run: |
+          git clone --depth=1 https://github.com/JeffSackmann/tennis_atp data/sackmann_atp
+          git clone --depth=1 https://github.com/JeffSackmann/tennis_wta data/sackmann_wta
+
+      - name: Restore or initialize database
+        uses: actions/cache@v4
+        with:
+          path: data/oracle.sqlite
+          key: oracle-db-${{ github.run_id }}
+          restore-keys: oracle-db-
+
+      - name: Initialize Elo (if DB missing)
+        run: |
+          if [ ! -f data/oracle.sqlite ]; then
+            echo "Initializing Elo ratings from 2010–present..."
+            npx ts-node scripts/init-elo.ts
+          fi
+
+      - name: Run pre-tournament simulation
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          ARGS="--tournament=${{ github.event.inputs.tournament }}"
+          ARGS="$ARGS --sims=${{ github.event.inputs.num_sims || '10000' }}"
+          if [ -n "${{ github.event.inputs.year }}" ]; then
+            ARGS="$ARGS --year=${{ github.event.inputs.year }}"
+          fi
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          npx ts-node scripts/pre-tournament.ts $ARGS
+
+      - name: Save database
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: data/oracle.sqlite
+          key: oracle-db-${{ github.run_id }}

@@ -1,0 +1,87 @@
+name: Daily Slam Predictions
+
+# Runs each morning during Grand Slam fortnights
+# AO: Jan 13–26 | RG: May 25–Jun 8 | WIM: Jun 30–Jul 13 | USO: Aug 25–Sep 7
+on:
+  schedule:
+    # 9:00 AM UTC = early morning before first matches start
+    - cron: '0 9 13-26 1 *'   # Australian Open (Jan)
+    - cron: '0 9 25-31 5 *'   # Roland Garros start (May)
+    - cron: '0 9 1-8  6 *'    # Roland Garros end (Jun)
+    - cron: '0 9 30-31 6 *'   # Wimbledon start (Jun)
+    - cron: '0 9 1-13  7 *'   # Wimbledon (Jul)
+    - cron: '0 9 25-31 8 *'   # US Open start (Aug)
+    - cron: '0 9 1-7   9 *'   # US Open end (Sep)
+  workflow_dispatch:
+    inputs:
+      tournament:
+        description: 'Tournament name (e.g. "Roland Garros")'
+        required: false
+      year:
+        description: 'Year (default: current year)'
+        required: false
+      dry_run:
+        description: 'Dry run (no Discord message)'
+        required: false
+        default: 'false'
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download Sackmann data
+        run: |
+          git clone --depth=1 https://github.com/JeffSackmann/tennis_atp data/sackmann_atp
+          git clone --depth=1 https://github.com/JeffSackmann/tennis_wta data/sackmann_wta
+
+      - name: Restore Elo database
+        uses: actions/cache@v4
+        with:
+          path: data/oracle.sqlite
+          key: oracle-db-${{ github.run_id }}
+          restore-keys: oracle-db-
+
+      - name: Initialize Elo (if DB missing)
+        run: |
+          if [ ! -f data/oracle.sqlite ]; then
+            echo "Database not found — initializing Elo from Sackmann data..."
+            npx ts-node scripts/init-elo.ts
+          else
+            echo "Database found — skipping Elo init."
+          fi
+
+      - name: Run daily predictions
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.tournament }}" ]; then
+            ARGS="$ARGS --tournament=${{ github.event.inputs.tournament }}"
+          fi
+          if [ -n "${{ github.event.inputs.year }}" ]; then
+            ARGS="$ARGS --year=${{ github.event.inputs.year }}"
+          fi
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          npx ts-node scripts/daily-predictions.ts $ARGS
+
+      - name: Save Elo database
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: data/oracle.sqlite
+          key: oracle-db-${{ github.run_id }}

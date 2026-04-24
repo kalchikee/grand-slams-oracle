@@ -1,0 +1,63 @@
+name: Weekly Elo Update
+
+# Runs every Monday to update Elo ratings from ATP/WTA tour results.
+# Runs silently between Slams (no Discord message).
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Every Monday at 6 AM UTC
+  workflow_dispatch:
+
+jobs:
+  update-elo:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download latest Sackmann data
+        run: |
+          git clone --depth=1 https://github.com/JeffSackmann/tennis_atp data/sackmann_atp
+          git clone --depth=1 https://github.com/JeffSackmann/tennis_wta data/sackmann_wta
+
+      - name: Restore database
+        uses: actions/cache@v4
+        with:
+          path: data/oracle.sqlite
+          key: oracle-db-weekly-${{ github.run_id }}
+          restore-keys: |
+            oracle-db-weekly-
+            oracle-db-
+
+      - name: Initialize if needed
+        run: |
+          if [ ! -f data/oracle.sqlite ]; then
+            echo "First run — full Elo initialization..."
+            npx ts-node scripts/init-elo.ts
+          else
+            echo "Incremental update..."
+            npx ts-node scripts/update-elo.ts
+          fi
+
+      - name: Save updated database
+        uses: actions/cache/save@v4
+        with:
+          path: data/oracle.sqlite
+          key: oracle-db-weekly-${{ github.run_id }}
+
+      - name: Upload database artifact (for debugging)
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: oracle-db-debug
+          path: data/oracle.sqlite
+          retention-days: 7

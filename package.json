@@ -1,0 +1,28 @@
+{
+  "name": "grand-slam-oracle",
+  "version": "4.1.0",
+  "description": "Tennis Grand Slam prediction engine — Elo + ML + bracket simulation + Discord alerts",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "init-elo": "ts-node scripts/init-elo.ts",
+    "update-elo": "ts-node scripts/update-elo.ts",
+    "pre-tournament": "ts-node scripts/pre-tournament.ts",
+    "daily-predictions": "ts-node scripts/daily-predictions.ts",
+    "daily-recap": "ts-node scripts/daily-recap.ts",
+    "test-discord": "ts-node scripts/test-discord.ts"
+  },
+  "dependencies": {
+    "axios": "^1.6.7",
+    "csv-parse": "^5.5.6",
+    "date-fns": "^3.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

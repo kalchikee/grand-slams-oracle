@@ -1,0 +1,7 @@
+node_modules/
+dist/
+data/oracle.sqlite
+data/sackmann_atp/
+data/sackmann_wta/
+.env
+*.log
