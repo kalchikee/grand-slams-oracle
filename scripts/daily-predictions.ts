@@ -17,6 +17,7 @@ import {
 } from '../src/db/database';
 import { MatchContext } from '../src/pipeline/features';
 import { MatchPrediction } from '../src/types';
+import { writePredictionsFile, SlamPickInput } from '../src/kalshi/predictionsFile';
 
 // ─── CLI Args ─────────────────────────────────────────────────────────────────
 
@@ -117,11 +118,13 @@ async function main(): Promise<void> {
   // ── Generate predictions ───────────────────────────────────────────────
   const mensPreds: MatchPrediction[] = [];
   const womensPreds: MatchPrediction[] = [];
+  const kalshiItems: SlamPickInput[] = [];
 
   for (const ctx of schedule) {
     const pred = predictMatch(ctx);
     if (ctx.gender === 'mens') mensPreds.push(pred);
     else womensPreds.push(pred);
+    kalshiItems.push({ prediction: pred, context: ctx });
 
     // Save to database
     savePrediction({
@@ -141,6 +144,14 @@ async function main(): Promise<void> {
     const favName = pred.playerAWinProb >= 0.5 ? pred.playerAName : pred.playerBName;
     const convTag = pred.isExtremeConviction ? ' 🔥' : pred.isHighConviction ? ' ⚡' : '';
     console.log(`  ${pred.playerAName} vs ${pred.playerBName} → ${favName} ${(favProb * 100).toFixed(0)}%${convTag}`);
+  }
+
+  // ── Write predictions JSON for kalshi-safety ──────────────────────────
+  try {
+    const jsonPath = writePredictionsFile(date, tournament.name, kalshiItems);
+    console.log(`Wrote predictions JSON: ${jsonPath}`);
+  } catch (err) {
+    console.warn('Failed to write predictions JSON (non-fatal):', err);
   }
 
   // ── Accuracy record ────────────────────────────────────────────────────
