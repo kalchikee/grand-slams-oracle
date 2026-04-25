@@ -12,10 +12,68 @@ let _womensModel: ModelCoefficients | null = null;
 let _mensCalib: CalibrationParams | null = null;
 let _womensCalib: CalibrationParams | null = null;
 
+function sanityCheckModel(model: ModelCoefficients | null, label: string): ModelCoefficients | null {
+  if (!model) return null;
+
+  // Length consistency: feature_names length must agree with the
+  // coefficients dict's key count (positional source of truth = feature_names).
+  const namesLen = Array.isArray(model.feature_names) ? model.feature_names.length : -1;
+  const coeffEntries = model.coefficients && typeof model.coefficients === 'object'
+    ? Object.keys(model.coefficients).length
+    : -1;
+
+  if (namesLen <= 0 || coeffEntries <= 0) {
+    console.error(
+      `[GrandSlams] ${label} model load aborted: feature_names (${namesLen}) or coefficients dict (${coeffEntries}) is empty — refusing to use the model.`,
+    );
+    return null;
+  }
+  if (namesLen !== coeffEntries) {
+    console.error(
+      `[GrandSlams] ${label} model load aborted: feature_names length (${namesLen}) disagrees with coefficients key count (${coeffEntries}) — refusing to use the model.`,
+    );
+    return null;
+  }
+
+  // Verify EVERY feature_name has a corresponding entry in the dict —
+  // catches the case where the JSON shape changed (e.g. became `coefficients: number[]`)
+  // and dict lookups would silently return undefined → 0.
+  const values: number[] = [];
+  let missing = 0;
+  for (const fname of model.feature_names) {
+    const v = (model.coefficients as Record<string, number>)[fname];
+    if (typeof v !== 'number' || Number.isNaN(v)) {
+      missing++;
+    } else {
+      values.push(v);
+    }
+  }
+  if (missing > 0) {
+    console.error(
+      `[GrandSlams] ${label} model load aborted: ${missing}/${namesLen} feature_names had no numeric coefficient (NaN or missing key) — JSON shape likely mismatched.`,
+    );
+    return null;
+  }
+
+  // All-zero check — strong signal of a JSON shape mismatch where lookups
+  // silently coerced to 0.
+  const nonZero = values.reduce((acc, v) => acc + (v !== 0 ? 1 : 0), 0);
+  if (nonZero === 0) {
+    console.error(
+      `[GrandSlams] ${label} model load aborted: ALL ${namesLen} coefficients are zero — JSON shape likely mismatched. Refusing to use the model.`,
+    );
+    return null;
+  }
+
+  return model;
+}
+
 function loadModels(): void {
   try {
-    _mensModel   = require(path.resolve(__dirname, '../../model/mens_model.json'));
-    _womensModel = require(path.resolve(__dirname, '../../model/womens_model.json'));
+    const rawMens   = require(path.resolve(__dirname, '../../model/mens_model.json')) as ModelCoefficients;
+    const rawWomens = require(path.resolve(__dirname, '../../model/womens_model.json')) as ModelCoefficients;
+    _mensModel   = sanityCheckModel(rawMens, 'mens');
+    _womensModel = sanityCheckModel(rawWomens, 'womens');
     _mensCalib   = require(path.resolve(__dirname, '../../model/calibration_mens.json'));
     _womensCalib = require(path.resolve(__dirname, '../../model/calibration_womens.json'));
   } catch (e) {
