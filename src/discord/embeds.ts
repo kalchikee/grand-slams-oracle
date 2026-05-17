@@ -216,11 +216,24 @@ export function buildDailyPredictionsEmbed(
   const mensFields  = buildMatchFields(mensPredictions,   `🎾 Men's — ${roundLabel}`);
   const womensFields = buildMatchFields(womensPredictions, `🎾 Women's — ${roundLabel}`);
 
+  // ── Season hit-rate ─────────────────────────────────────────────────────
+  // Pulled from the same AccuracyRecord the recap uses, so morning + recap
+  // agree on the number. Only shown when the tracker has graded predictions
+  // (off-season / pre-day-1 → totalPredictions === 0 → hidden).
+  const seasonAccField: EmbedField | null = accuracy.totalPredictions > 0
+    ? {
+        name: '📊 Season Accuracy',
+        value: `**${((accuracy.correctPredictions / accuracy.totalPredictions) * 100).toFixed(1)}%** · ${accuracy.correctPredictions}/${accuracy.totalPredictions} predictions correct this season`,
+        inline: false,
+      }
+    : null;
+
   embeds.push({
     title: `${tournament.emoji} ${tournament.name} ${year} — Day ${dayNum} (${roundLabel}) Predictions`,
     description: truncate(header, 4096),
     color: tournament.color,
     fields: [
+      ...(seasonAccField ? [seasonAccField] : []),
       ...mensFields,
       ...womensFields,
     ].slice(0, 25),
