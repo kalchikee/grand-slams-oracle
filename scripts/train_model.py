@@ -519,8 +519,22 @@ def export_models(mens_result, womens_result):
             'b': r['platt_B'],
         }
 
-        model_path = MODEL_DIR / f'{gender}_model.json'
-        calib_path = MODEL_DIR / f'calibration_{gender}.json'
+        # Scaler: inference must do (x - mean) / scale per feature before the
+        # logistic dot-product, or the JS side dots raw Elo points (~hundreds)
+        # against scaled-coefficient values and the sigmoid saturates to 1.0
+        # on every match. predictMatch will reject any model whose elo_diff
+        # coefficient is too large for raw inputs, so until this file ships
+        # all picks fall back to Elo-only.
+        scaler = r['scaler']
+        scaler_json = {
+            'feature_names': r['feature_names'],
+            'mean':  [float(x) for x in scaler.mean_.tolist()],
+            'scale': [float(x) for x in scaler.scale_.tolist()],
+        }
+
+        model_path  = MODEL_DIR / f'{gender}_model.json'
+        calib_path  = MODEL_DIR / f'calibration_{gender}.json'
+        scaler_path = MODEL_DIR / f'scaler_{gender}.json'
 
         with open(model_path, 'w') as f:
             json.dump(model_json, f, indent=2)
@@ -528,8 +542,12 @@ def export_models(mens_result, womens_result):
         with open(calib_path, 'w') as f:
             json.dump(calib_json, f, indent=2)
 
+        with open(scaler_path, 'w') as f:
+            json.dump(scaler_json, f, indent=2)
+
         print(f'  Exported: {model_path}')
         print(f'  Exported: {calib_path}')
+        print(f'  Exported: {scaler_path}')
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 

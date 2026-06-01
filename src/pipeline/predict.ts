@@ -12,7 +12,15 @@ let _womensModel: ModelCoefficients | null = null;
 let _mensCalib: CalibrationParams | null = null;
 let _womensCalib: CalibrationParams | null = null;
 
-function sanityCheckModel(model: ModelCoefficients | null, label: string): ModelCoefficients | null {
+interface FeatureScaler { feature_names: string[]; mean: number[]; scale: number[]; }
+let _mensScaler: FeatureScaler | null = null;
+let _womensScaler: FeatureScaler | null = null;
+
+function sanityCheckModel(
+  model: ModelCoefficients | null,
+  label: string,
+  scaler: FeatureScaler | null,
+): ModelCoefficients | null {
   if (!model) return null;
 
   // Length consistency: feature_names length must agree with the
@@ -65,15 +73,59 @@ function sanityCheckModel(model: ModelCoefficients | null, label: string): Model
     return null;
   }
 
+  // Unscaled-coefficient check. The Python trainer fits a StandardScaler
+  // before logistic regression. If the scaler artifact was shipped, inference
+  // will normalize features before the dot-product and any coefficient
+  // magnitude is fine. If it's missing we'd multiply coefficients by raw
+  // feature values — the two big-magnitude raw features are *_elo_diff
+  // (hundreds of points), so coefficients > ~0.05 there saturate the sigmoid
+  // to ±∞ on every match and the model returns 1.0 / 0.0 universally. Detect
+  // that case here and refuse the model so predictMatch falls back to
+  // Elo-only — a usable Discord post — until the scaler ships.
+  if (!scaler) {
+    const eloCoef = Math.max(
+      Math.abs((model.coefficients as Record<string, number>)['surface_elo_diff'] ?? 0),
+      Math.abs((model.coefficients as Record<string, number>)['overall_elo_diff'] ?? 0),
+    );
+    if (eloCoef > 0.05) {
+      console.error(
+        `[GrandSlams] ${label} model load aborted: *_elo_diff coefficient = ${eloCoef.toFixed(4)} ` +
+        `applied to raw Elo points would saturate sigmoid on every match — model was trained ` +
+        `with StandardScaler but scaler_${label}.json is missing. Falling back to Elo-only ` +
+        `until the trainer re-exports the scaler.`,
+      );
+      return null;
+    }
+  } else {
+    // Scaler must align with feature_names — otherwise we'd normalize the
+    // wrong columns.
+    if (scaler.feature_names.length !== namesLen ||
+        scaler.mean.length !== namesLen ||
+        scaler.scale.length !== namesLen) {
+      console.error(
+        `[GrandSlams] ${label} scaler shape mismatch (feature_names=${scaler.feature_names.length}, ` +
+        `mean=${scaler.mean.length}, scale=${scaler.scale.length}, expected=${namesLen}). ` +
+        `Falling back to Elo-only.`,
+      );
+      return null;
+    }
+  }
+
   return model;
+}
+
+function tryRequire<T>(p: string): T | null {
+  try { return require(p) as T; } catch { return null; }
 }
 
 function loadModels(): void {
   try {
     const rawMens   = require(path.resolve(__dirname, '../../model/mens_model.json')) as ModelCoefficients;
     const rawWomens = require(path.resolve(__dirname, '../../model/womens_model.json')) as ModelCoefficients;
-    _mensModel   = sanityCheckModel(rawMens, 'mens');
-    _womensModel = sanityCheckModel(rawWomens, 'womens');
+    _mensScaler   = tryRequire<FeatureScaler>(path.resolve(__dirname, '../../model/scaler_mens.json'));
+    _womensScaler = tryRequire<FeatureScaler>(path.resolve(__dirname, '../../model/scaler_womens.json'));
+    _mensModel   = sanityCheckModel(rawMens, 'mens', _mensScaler);
+    _womensModel = sanityCheckModel(rawWomens, 'womens', _womensScaler);
     _mensCalib   = require(path.resolve(__dirname, '../../model/calibration_mens.json'));
     _womensCalib = require(path.resolve(__dirname, '../../model/calibration_womens.json'));
   } catch (e) {
@@ -89,10 +141,21 @@ function sigmoid(x: number): number {
   return 1 / (1 + Math.exp(-x));
 }
 
-function logisticPredict(features: MatchFeatures, model: ModelCoefficients): number {
+function logisticPredict(
+  features: MatchFeatures,
+  model: ModelCoefficients,
+  scaler: FeatureScaler | null,
+): number {
   let logit = model.intercept;
-  for (const fname of model.feature_names) {
-    const val = (features as any)[fname] ?? 0;
+  for (let i = 0; i < model.feature_names.length; i++) {
+    const fname = model.feature_names[i];
+    let val = (features as any)[fname] ?? 0;
+    if (scaler) {
+      // StandardScaler: (x - mean) / scale. Trainer guarantees scaler arrays
+      // are aligned with feature_names (validated in sanityCheckModel).
+      const s = scaler.scale[i] || 1;
+      val = (val - scaler.mean[i]) / s;
+    }
     const coef = model.coefficients[fname] ?? 0;
     logit += coef * val;
   }
@@ -120,12 +183,13 @@ function eloOnlyPredict(ctx: MatchContext): number {
 export function predictMatch(ctx: MatchContext): MatchPrediction {
   const features = extractFeatures(ctx);
 
-  const model = ctx.gender === 'mens' ? _mensModel : _womensModel;
-  const calib = ctx.gender === 'mens' ? _mensCalib : _womensCalib;
+  const model  = ctx.gender === 'mens' ? _mensModel  : _womensModel;
+  const calib  = ctx.gender === 'mens' ? _mensCalib  : _womensCalib;
+  const scaler = ctx.gender === 'mens' ? _mensScaler : _womensScaler;
 
   let rawProb: number;
   if (model) {
-    rawProb = logisticPredict(features, model);
+    rawProb = logisticPredict(features, model, scaler);
     if (calib) rawProb = plattCalibrate(rawProb, calib);
   } else {
     rawProb = eloOnlyPredict(ctx);
