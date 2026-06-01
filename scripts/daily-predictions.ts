@@ -13,10 +13,10 @@ import { predictMatch } from '../src/pipeline/predict';
 import { buildDailyPredictionsEmbed } from '../src/discord/embeds';
 import { sendWebhook, getWebhookUrl } from '../src/discord/webhook';
 import {
-  getOrCreateAccuracy, savePrediction, getDraw,
+  getOrCreateAccuracy, savePrediction, getDraw, saveDraw, getDb,
 } from '../src/db/database';
 import { MatchContext } from '../src/pipeline/features';
-import { MatchPrediction } from '../src/types';
+import { MatchPrediction, DrawEntry } from '../src/types';
 import { writePredictionsFile, SlamPickInput } from '../src/kalshi/predictionsFile';
 
 // ─── CLI Args ─────────────────────────────────────────────────────────────────
@@ -29,20 +29,80 @@ const dryRun        = args.includes('--dry-run');
 
 // ─── Sample Schedule (for testing) ───────────────────────────────────────────
 
+// Seed list used to bootstrap a draw when the DB has none. Player IDs in the
+// `players` table are Sackmann numeric IDs (e.g. "104925" = Djokovic), so
+// looking up by slug fails and predictMatch falls back to a default Elo —
+// producing 99% blowouts in the wrong direction. We look up each player by
+// name against the actual players table; misses are dropped. Keeps
+// daily-predictions usable when pre-tournament-sim never ran (the
+// silent-failure path that killed Roland Garros 2026 Discord output).
+function bootstrapSampleDraw(
+  _tournamentName: string,
+  _year: number,
+  gender: 'mens' | 'womens',
+): DrawEntry[] {
+  const wantedNames = gender === 'mens' ? [
+    'Novak Djokovic', 'Carlos Alcaraz', 'Jannik Sinner', 'Daniil Medvedev',
+    'Alexander Zverev', 'Andrey Rublev', 'Holger Rune', 'Casper Ruud',
+    'Tommy Paul', 'Grigor Dimitrov', 'Taylor Fritz', 'Alex De Minaur',
+    'Stefanos Tsitsipas', 'Ben Shelton', 'Frances Tiafoe', 'Ugo Humbert',
+  ] : [
+    'Iga Swiatek', 'Aryna Sabalenka', 'Coco Gauff', 'Elena Rybakina',
+    'Jessica Pegula', 'Marketa Vondrousova', 'Ons Jabeur', 'Caroline Garcia',
+    'Karolina Muchova', 'Mirra Andreeva', 'Diana Shnaider', 'Emma Navarro',
+    'Danielle Collins', 'Belinda Bencic', 'Anna Kalinskaya', 'Liudmila Samsonova',
+  ];
+  const db = getDb();
+  const lookup = db.prepare(
+    "SELECT player_id, name FROM players WHERE LOWER(REPLACE(name,'-',' ')) = LOWER(?) LIMIT 1"
+  );
+  const draw: DrawEntry[] = [];
+  let drawPos = 1;
+  for (const name of wantedNames) {
+    const row = lookup.get(name) as { player_id: string; name: string } | undefined;
+    if (!row) {
+      console.log(`[bootstrap] WARN: ${name} not found in players table — skipping`);
+      continue;
+    }
+    draw.push({
+      playerId: row.player_id, playerName: row.name,
+      seed: drawPos, drawPosition: drawPos++, gender,
+    });
+  }
+  return draw;
+}
+
 function buildSampleSchedule(
   tournamentName: string,
   year: number,
   date: string,
   round: string
 ): MatchContext[] {
-  // Pull seeded players from the draw to build realistic matchups
-  const mensDraw = getDraw(tournamentName, year, 'mens');
-  const womensDraw = getDraw(tournamentName, year, 'womens');
+  // Pull seeded players from the draw to build realistic matchups.
+  // If pre-tournament-sim never ran for this Slam, bootstrap a draw so daily
+  // predictions still produce output instead of exiting silently.
+  let mensDraw = getDraw(tournamentName, year, 'mens');
+  let womensDraw = getDraw(tournamentName, year, 'womens');
+  if (mensDraw.length === 0) {
+    console.log(`[bootstrap] No men's draw in DB for ${tournamentName} ${year} — seeding fallback draw.`);
+    mensDraw = bootstrapSampleDraw(tournamentName, year, 'mens');
+    saveDraw(tournamentName, year, 'mens', mensDraw);
+  }
+  if (womensDraw.length === 0) {
+    console.log(`[bootstrap] No women's draw in DB for ${tournamentName} ${year} — seeding fallback draw.`);
+    womensDraw = bootstrapSampleDraw(tournamentName, year, 'womens');
+    saveDraw(tournamentName, year, 'womens', womensDraw);
+  }
 
   const schedule: MatchContext[] = [];
   const surface = TOURNAMENTS.find(t => t.name === tournamentName)?.surface ?? 'hard';
 
-  // Pair up players by draw position (R1 = 1v128, 2v127, etc.)
+  // Pair players for the day. For a real 128-draw we'd use 1v128 / 2v127
+  // (top-vs-bottom R1 spread). For the bootstrap-seed draw (≤16 known
+  // players, no fillers) we instead pair from the ends of the seeded band
+  // (1v16, 2v15, ...) so every prediction is between two real players —
+  // pairing a seed against a placeholder produces 99% blowouts in the
+  // wrong direction because the placeholder has no Elo entry.
   const addMatches = (draw: typeof mensDraw, gender: 'mens' | 'womens', limit = 8) => {
     const sorted = [...draw].sort((a, b) => a.drawPosition - b.drawPosition);
     for (let i = 0; i < Math.min(sorted.length / 2, limit); i++) {
@@ -111,7 +171,27 @@ async function main(): Promise<void> {
   console.log(`\nMatches to predict: ${schedule.length}`);
 
   if (schedule.length === 0) {
-    console.log('No matches scheduled. Exiting.');
+    console.log('No matches scheduled.');
+    if (!dryRun) {
+      try {
+        const webhookUrl = getWebhookUrl();
+        await sendWebhook(webhookUrl, {
+          username: 'Grand Slam Oracle',
+          embeds: [{
+            title: `⚠️ ${tournament.name} ${year} — no matches produced`,
+            description:
+              `Daily predictions ran for **${date}** (${roundLabel}) but produced 0 matches.\n\n` +
+              'Possible causes: draw is empty AND fallback seed list is empty, or ' +
+              '`predictMatch` rejected every pairing. Check the workflow log.',
+            color: 0xE67E22,
+            footer: { text: 'Grand Slam Oracle · daily-predictions' },
+            timestamp: new Date().toISOString(),
+          }],
+        });
+      } catch (err) {
+        console.error('Failed to send empty-schedule alert:', err);
+      }
+    }
     process.exit(0);
   }
 
