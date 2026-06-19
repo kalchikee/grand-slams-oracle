@@ -428,6 +428,54 @@ export function getDraw(tournament: string, year: number, gender: string): DrawE
 
 // ─── Accuracy Tracking ───────────────────────────────────────────────────────
 
+export interface ConfidenceBucket {
+  label: string;     // e.g. "70-80%"
+  total: number;
+  correct: number;
+  accuracy: number;  // 0..1
+}
+
+// Confidence-bucket calibration for the morning Discord embed. We bin on
+// PICK-SIDE probability (max(player_a_win_prob, 1 - player_a_win_prob)) so a
+// 35% player-A pick counts as a 65% player-B pick — that way buckets always
+// live in [0.5, 1.0] regardless of which side the model favored. Buckets are
+// half-open [lo, hi). Only buckets with at least one graded pick are
+// returned so the embed stays compact early in the season.
+export function getConfidenceBuckets(): ConfidenceBucket[] {
+  const db = getDb();
+  const rows = db.prepare(
+    `SELECT player_a_win_prob, correct
+       FROM predictions
+       WHERE correct IS NOT NULL`
+  ).all() as Array<{ player_a_win_prob: number; correct: number }>;
+
+  const buckets: Array<{ lo: number; hi: number; label: string; total: number; correct: number }> = [
+    { lo: 0.50, hi: 0.60, label: '50-60%', total: 0, correct: 0 },
+    { lo: 0.60, hi: 0.70, label: '60-70%', total: 0, correct: 0 },
+    { lo: 0.70, hi: 0.80, label: '70-80%', total: 0, correct: 0 },
+    { lo: 0.80, hi: 0.90, label: '80-90%', total: 0, correct: 0 },
+    { lo: 0.90, hi: 1.01, label: '90%+',   total: 0, correct: 0 },
+  ];
+  for (const r of rows) {
+    const pickProb = Math.max(r.player_a_win_prob, 1 - r.player_a_win_prob);
+    for (const b of buckets) {
+      if (pickProb >= b.lo && pickProb < b.hi) {
+        b.total += 1;
+        if (r.correct === 1) b.correct += 1;
+        break;
+      }
+    }
+  }
+  return buckets
+    .filter(b => b.total > 0)
+    .map(b => ({
+      label: b.label,
+      total: b.total,
+      correct: b.correct,
+      accuracy: b.correct / b.total,
+    }));
+}
+
 export function getOrCreateAccuracy(tournament: string, year: number): AccuracyRecord {
   const db = getDb();
   let r = row(db.prepare(

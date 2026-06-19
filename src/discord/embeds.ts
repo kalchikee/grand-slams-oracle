@@ -228,12 +228,37 @@ export function buildDailyPredictionsEmbed(
       }
     : null;
 
+  // ── Per-confidence-bucket calibration ──────────────────────────────────
+  // Shows how the model's declared probability tracks reality at each tier
+  // (e.g. of picks tagged 70-80%, how many actually won). Gated on the
+  // season-accuracy field showing > 0 predictions; buckets with no graded
+  // picks are filtered out server-side in getConfidenceBuckets() so the
+  // embed stays compact early in the season.
+  let calibrationField: EmbedField | null = null;
+  if (seasonAccField) {
+    const { getConfidenceBuckets } = require('../db/database');
+    const buckets = getConfidenceBuckets() as Array<{
+      label: string; total: number; correct: number; accuracy: number;
+    }>;
+    if (buckets.length > 0) {
+      const lines = buckets.map(b =>
+        `**${b.label}** · ${b.correct}/${b.total} (${(b.accuracy * 100).toFixed(1)}%)`
+      );
+      calibrationField = {
+        name: '🎯 Calibration by confidence',
+        value: lines.join('\n'),
+        inline: false,
+      };
+    }
+  }
+
   embeds.push({
     title: `${tournament.emoji} ${tournament.name} ${year} — Day ${dayNum} (${roundLabel}) Predictions`,
     description: truncate(header, 4096),
     color: tournament.color,
     fields: [
       ...(seasonAccField ? [seasonAccField] : []),
+      ...(calibrationField ? [calibrationField] : []),
       ...mensFields,
       ...womensFields,
     ].slice(0, 25),
